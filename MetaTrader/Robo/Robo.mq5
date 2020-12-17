@@ -1,0 +1,346 @@
+//+------------------------------------------------------------------+
+//|                                           Bandas de Bolinger.mq5 |
+//|                                                             Juan |
+//+------------------------------------------------------------------+
+#property copyright "Juan"
+#property link      ""
+#property version   "1.00"
+
+// Inclusão de bibliotecas utilizadas
+#include <Trade/Trade.mqh>
+#include <Trade/SymbolInfo.mqh>
+
+input group              "Configurações gerais"
+input ulong              Magic          = 123456;      // Número mágico
+
+int                Volume         = 2000;         // Volume
+double             SL             = 0.1;         // Stop Loss
+double             TP             = 0.105;          // Take Profit
+
+input group              "Configurações do indicador"
+input int                Periodo        = 20;          // Período
+input double             Desvio         = 3;         // Desvio
+input int                Deslocamento   = 0;           // Deslocar
+input ENUM_APPLIED_PRICE Preco          = PRICE_CLOSE; // Preço Aplicado
+
+input group              "Configurações de horários"
+input string             inicio         = "09:00";     // Horário de Início (entradas)
+input string             termino        = "17:00";     // Horário de Término (entradas)
+input string             fechamento     = "17:30";     // Horário de Fechamento (posições)
+
+#import "Comunicador.ex5"
+   double profit(double prof);
+#import
+
+
+double      aux_capital  =   0;    //Capital quando atingir 10% a mais ou a menos do total de capital
+int         handle;                //Recebe os manipuladores  
+string      shortname;
+string min_trade;
+
+CTrade      negocio; // Classe responsável pela execução de negócios
+CSymbolInfo simbolo; // Classe responsãvel pelos dados do ativo
+
+// Estruturas de tempo para manipulação de horários
+MqlDateTime horario_inicio, horario_termino, horario_fechamento, horario_atual;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+//---
+// Definição do símbolo utilizado para a classe responsável
+   if(!simbolo.Name(_Symbol))
+     {
+      printf("Ativo Inválido!");
+      return INIT_FAILED;
+     }
+
+// Criação dos manipulador
+   handle = iBands(_Symbol, _Period, Periodo, Deslocamento, Desvio, Preco);
+
+// Verificação do resultado da criação dos manipuladores
+   if(handle == INVALID_HANDLE)
+     {
+      Print("Erro na criação dos manipuladores");
+      return INIT_FAILED;
+     }
+
+   if(!ChartIndicatorAdd(0, 0, handle))
+     {
+      Print("Erro na adição do indicador ao gráfico");
+      return INIT_FAILED;
+     }
+
+   shortname = ChartIndicatorName(0, 0, ChartIndicatorsTotal(0, 0)-1);
+//---
+
+// Criação das structs de tempo
+   TimeToStruct(StringToTime(inicio), horario_inicio);
+   TimeToStruct(StringToTime(termino), horario_termino);
+   TimeToStruct(StringToTime(fechamento), horario_fechamento);
+
+// Verificação de inconsistências nos parâmetros de entrada
+   if(horario_inicio.hour > horario_termino.hour || (horario_inicio.hour == horario_termino.hour && horario_inicio.min > horario_termino.min))
+     {
+      printf("Parâmetros de Horário inválidos!");
+      return INIT_FAILED;
+     }
+
+// Verificação de inconsistências nos parâmetros de entrada
+   if(horario_termino.hour > horario_fechamento.hour || (horario_termino.hour == horario_fechamento.hour && horario_termino.min > horario_fechamento.min))
+     {
+      printf("Parâmetros de Horário inválidos!");
+      return INIT_FAILED;
+     }
+
+   return(INIT_SUCCEEDED);
+  }
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+//---
+   ChartIndicatorDelete(0, 0, shortname);
+
+// Motivo da desinicialização do EA
+   printf("Deinit reason: %d", reason);
+  }
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+//---
+   double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+
+   //double aux = capital / 10;
+   
+   double preco;
+   SymbolInfoDouble(_Symbol, SYMBOL_ASK, preco);
+
+   double aux = Volume * preco;
+    
+   double float_profit=AccountInfoDouble(ACCOUNT_PROFIT);
+   profit(float_profit);
+   double a = profit(1);
+ 
+      
+   if(aux < equity && Volume < 100000)
+     {
+      string volume = IntegerToString((Volume * 0.1) + Volume);
+
+      uchar sha[];
+      StringToCharArray(volume,sha);
+      int tamanho = ArraySize(sha);
+      sha[tamanho-2] = 048;
+      sha[tamanho-3] = 048;
+      volume=CharArrayToString(sha);
+      Volume = StringToInteger(volume);
+      aux_capital = equity;
+     }
+   else
+      if(aux > equity && Volume > 2000)
+        {
+         string volume = IntegerToString(Volume - (Volume * 0.1));
+
+         uchar sha[];
+         StringToCharArray(volume,sha);
+         int tamanho = ArraySize(sha);
+         sha[tamanho-2] = 048;
+         sha[tamanho-3] = 048;
+         volume=CharArrayToString(sha);
+         Volume = StringToInteger(volume);
+         aux_capital = equity;
+        }
+
+// Atualização dos dados do ativo
+   if(!simbolo.RefreshRates())
+      return;
+// EA em horário de entrada em novas operações
+   if(HorarioEntrada())
+     {
+      // EA não está posicionado
+      if(SemPosicao())
+        {
+         // Verificar estratégia e determinar compra ou venda
+         int resultado = Sinal();
+
+         // Estratégia indicou compra
+         if(resultado  == 1)
+           {
+            Compra();
+           }
+
+         // Estratégia indicou venda
+         if(resultado  == -1)
+           {
+            Venda();
+           }
+        }
+     }
+
+// EA em horário de fechamento de posições abertas
+   if(HorarioFechamento())
+     {
+      // EA está posicionado, fechar posição
+      if(!SemPosicao())
+         Fechar();
+     }
+  }
+//+------------------------------------------------------------------+
+//| Checar se horário atual está dentro do horário de entradas       |
+//+------------------------------------------------------------------+
+bool HorarioEntrada()
+  {
+   TimeToStruct(TimeCurrent(), horario_atual); // Obtenção do horário atual
+
+// Hora dentro do horário de entradas
+   if(horario_atual.hour >= horario_inicio.hour && horario_atual.hour <= horario_termino.hour)
+     {
+      // Hora atual igual a de início
+      if(horario_atual.hour == horario_inicio.hour)
+         // Se minuto atual maior ou igual ao de início => está no horário de entradas
+         if(horario_atual.min >= horario_inicio.min)
+            return true;
+      // Do contrário não está no horário de entradas
+         else
+            return false;
+
+      // Hora atual igual a de término
+      if(horario_atual.hour == horario_termino.hour)
+         // Se minuto atual menor ou igual ao de término => está no horário de entradas
+         if(horario_atual.min <= horario_termino.min)
+            return true;
+      // Do contrário não está no horário de entradas
+         else
+            return false;
+
+      // Hora atual maior que a de início e menor que a de término
+      return true;
+     }
+
+// Hora fora do horário de entradas
+   return false;
+  }
+//+------------------------------------------------------------------+
+//| Checar se horário atual está dentro do horário de fechamento     |
+//+------------------------------------------------------------------+
+bool HorarioFechamento()
+  {
+   TimeToStruct(TimeCurrent(), horario_atual); // Obtenção do horário atual
+
+// Hora dentro do horário de fechamento
+   if(horario_atual.hour >= horario_fechamento.hour)
+     {
+      // Hora atual igual a de fechamento
+      if(horario_atual.hour == horario_fechamento.hour)
+         // Se minuto atual maior ou igual ao de fechamento => está no horário de fechamento
+         if(horario_atual.min >= horario_fechamento.min)
+            return true;
+      // Do contrário não está no horário de fechamento
+         else
+            return false;
+
+      // Hora atual maior que a de fechamento
+      return true;
+     }
+
+// Hora fora do horário de fechamento
+   return false;
+  }
+//+------------------------------------------------------------------+
+//| Realizar compra com parâmetros especificados por input           |
+//+------------------------------------------------------------------+
+void Compra()
+  {
+   double price = simbolo.Ask();
+   double stoploss = simbolo.NormalizePrice(price - SL); // Cálculo normalizado do stoploss
+   double takeprofit = simbolo.NormalizePrice(price + TP); // Cálculo normalizado do takeprofit
+
+   negocio.Buy(Volume, NULL, price, stoploss, takeprofit, "Compra"); // Envio da ordem de compra pela classe responsável
+  }
+//+------------------------------------------------------------------+
+//| Realizar venda com parâmetros especificados por input            |
+//+------------------------------------------------------------------+
+void Venda()
+  {
+   double price = simbolo.Bid();
+   double stoploss = simbolo.NormalizePrice(price + SL); // Cálculo normalizado do stoploss
+   double takeprofit = simbolo.NormalizePrice(price - TP); // Cálculo normalizado do takeprofit
+
+   negocio.Sell(Volume, NULL, price, stoploss, takeprofit, "Venda"); // Envio da ordem de compra pela classe responsável
+  }
+//+------------------------------------------------------------------+
+//| Fechar posição aberta                                            |
+//+------------------------------------------------------------------+
+void Fechar()
+  {
+// Verificação de posição aberta
+   int total = PositionsTotal();
+   for(int i=total-1; i>=0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol || PositionGetInteger(POSITION_MAGIC)!=Magic)
+         continue;
+      negocio.PositionClose(ticket);
+     }
+  }
+//+------------------------------------------------------------------+
+//| Verificar se há posição aberta                                   |
+//+------------------------------------------------------------------+
+bool SemPosicao()
+  {
+   int total = PositionsTotal();
+   for(int i=total-1; i>=0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol || PositionGetInteger(POSITION_MAGIC)!=Magic)
+         continue;
+      return false;
+     }
+
+   return true;
+  }
+//+------------------------------------------------------------------+
+//| Estratégia                                                       |
+//+------------------------------------------------------------------+
+int Sinal()
+  {
+   double superior[], inferior[];
+
+   ArraySetAsSeries(superior, true);
+   ArraySetAsSeries(inferior, true);
+   CopyBuffer(handle, 1, 0, 2, superior);
+   CopyBuffer(handle, 2, 0, 2, inferior);
+
+   double close_atual = iClose(_Symbol, _Period, 0);
+   double close_anterior = iClose(_Symbol, _Period, 1);
+
+
+   datetime horario = TimeCurrent();
+   string min_atual = TimeToString(
+                          horario,             // número
+                          TIME_MINUTES      // formato de saída
+                       );
+
+   if(min_trade[4] != min_atual[4])
+     {
+      min_trade = min_atual;
+      if(close_anterior >= inferior[1] && close_atual < inferior[0])
+         return 1;
+      if(close_anterior <= superior[1] && close_atual > superior[0])
+         return -1;
+     }
+
+   return 0;
+  }
+//+------------------------------------------------------------------+
+
